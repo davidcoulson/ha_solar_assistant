@@ -41,6 +41,7 @@ from .const import (
     CONF_ENABLED_TOPICS,
     CONF_HOST,
     CONF_LOCAL_IP,
+    CONF_MIN_UPDATE_INTERVAL_S,
     CONF_PASSWORD,
     CONF_SITE_ID,
     CONF_SITE_KEY,
@@ -48,6 +49,7 @@ from .const import (
     CONF_TOKEN,
     DEFAULT_ENABLED_GLOBS,
     DEFAULT_LOCAL_HOST,
+    DEFAULT_MIN_UPDATE_INTERVAL_S,
     DOMAIN,
     MDNS_SCAN_TIMEOUT_S,
     MDNS_SERVICE_TYPE,
@@ -358,10 +360,31 @@ class SolarAssistantOptionsFlow(OptionsFlow):
             selected.extend(_globs_not_offered(current_globs, form_sections))
             return self.async_create_entry(
                 title="",
-                data={CONF_ENABLED_TOPICS: sorted(set(selected))},
+                data={
+                    CONF_ENABLED_TOPICS: sorted(set(selected)),
+                    CONF_MIN_UPDATE_INTERVAL_S: user_input.get(
+                        CONF_MIN_UPDATE_INTERVAL_S, DEFAULT_MIN_UPDATE_INTERVAL_S
+                    ),
+                },
             )
 
-        schema_dict: dict[Any, Any] = {}
+        current_min_interval = self._entry.options.get(
+            CONF_MIN_UPDATE_INTERVAL_S, DEFAULT_MIN_UPDATE_INTERVAL_S
+        )
+
+        schema_dict: dict[Any, Any] = {
+            vol.Optional(
+                CONF_MIN_UPDATE_INTERVAL_S, default=current_min_interval
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0,
+                    max=3600,
+                    step=1,
+                    unit_of_measurement="s",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            ),
+        }
         for sec in form_sections.values():
             choices = sec["choices"]
             default = [g for g in choices if any(_overlaps(g, c) for c in current_globs)]
