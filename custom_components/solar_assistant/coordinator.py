@@ -255,8 +255,7 @@ class SolarAssistantCoordinator:
             self.last_update[topic] = utcnow()
             if is_new:
                 async_dispatcher_send(self.hass, self.signal_new_metric, topic)
-            elif self.definitions[topic].get("platform") in ("number", "select", "switch"):
-                async_dispatcher_send(self.hass, self.signal_metric_update, frozenset({topic}))
+            async_dispatcher_send(self.hass, self.signal_metric_update, frozenset({topic}))
 
     async def _fetch_discovery(self) -> list[DeviceMetric]:
         d = self.entry.data

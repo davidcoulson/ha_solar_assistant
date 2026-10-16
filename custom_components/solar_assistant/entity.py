@@ -93,6 +93,10 @@ class SolarAssistantMetricEntity(Entity):
             )
 
     @property
+    def _definition(self) -> dict[str, Any]:
+        return self._coordinator.definitions[self._topic]
+
+    @property
     def available(self) -> bool:
         return (self._coordinator.is_connected
                 and self._topic in self._coordinator.last_update)
