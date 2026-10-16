@@ -38,6 +38,24 @@
           "search": "Site name",
           "site_id": "Site"
         }
+      },
+      "reauth_confirm": {
+        "title": "Update credentials",
+        "description": "Enter the current web password or cloud API key for this unit.",
+        "data": {
+          "password": "Web password",
+          "api_key": "API key"
+        }
+      },
+      "reconfigure": {
+        "title": "Confirm trusted address",
+        "description": "Verify the address independently before submitting. Local HTTP/WebSocket traffic sends credentials and measurements without encryption.",
+        "data": {
+          "host": "Trusted host",
+          "local_ip": "Trusted local IP (empty for cloud only)",
+          "password": "Web password",
+          "api_key": "API key"
+        }
       }
     },
     "error": {

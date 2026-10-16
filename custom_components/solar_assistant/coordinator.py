@@ -150,6 +150,9 @@ class SolarAssistantCoordinator:
                 self._first_failure_at = None
             except asyncio.CancelledError:
                 return
+            except _CredentialsRejected as err:
+                self._request_reauth(err)
+                return
             except _ReauthRequired as err:
                 _LOGGER.info("Re-authorizing site %s: %s", self.entry.title, err)
                 self._set_connection_state(False, error=str(err))
@@ -158,6 +161,9 @@ class SolarAssistantCoordinator:
                     backoff = RECONNECT_INITIAL_S
                     self._first_failure_at = None
                     continue
+                except _CredentialsRejected as auth_err:
+                    self._request_reauth(auth_err)
+                    return
                 except Exception as auth_err:
                     _LOGGER.warning("Re-authorize failed: %s", auth_err)
                     self._set_connection_state(False, error=f"re-authorize failed: {auth_err}")
@@ -199,8 +205,10 @@ class SolarAssistantCoordinator:
             sock = await connect(opts)
         except ConnectError as err:
             msg = str(err)
-            if ("401" in msg or "403" in msg) and self.entry.data.get(CONF_AUTH_METHOD) == AUTH_CLOUD:
-                raise _ReauthRequired(msg) from err
+            if "401" in msg or "403" in msg:
+                if self.entry.data.get(CONF_AUTH_METHOD) == AUTH_CLOUD:
+                    raise _ReauthRequired(msg) from err
+                raise _CredentialsRejected(msg) from err
             raise
 
         try:
@@ -220,6 +228,9 @@ class SolarAssistantCoordinator:
         try:
             metrics = await self._fetch_discovery()
         except Exception as err:
+            if (self.entry.data.get(CONF_AUTH_METHOD, AUTH_LOCAL) == AUTH_LOCAL
+                    and getattr(err, "status", None) in (401, 403)):
+                raise _CredentialsRejected(str(err)) from err
             _LOGGER.debug("REST discovery skipped: %s", err)
             return
         for m in metrics:
@@ -292,9 +303,12 @@ class SolarAssistantCoordinator:
         _LOGGER.info("IP recovery: scanning mDNS for site_id=%s", site_id)
         new_ip = await self._mdns_find_ip(int(site_id))
         if new_ip:
-            _LOGGER.info("IP recovery: found %s via mDNS, updating stored host", new_ip)
-            self._update_host(new_ip)
-            return
+            _LOGGER.warning(
+                "mDNS suggests %s for this unit. Verify the address independently, "
+                "then use Reconfigure to confirm it before credentials are sent", new_ip
+            )
+            if method == AUTH_LOCAL:
+                return
 
         # mDNS found nothing — for cloud entries try re-authorizing (max once per 12 h)
         if method == AUTH_CLOUD:
@@ -305,15 +319,15 @@ class SolarAssistantCoordinator:
                 _LOGGER.info("IP recovery: refreshing cloud token to get updated local IP")
                 try:
                     await self._refresh_cloud_token()
+                except _CredentialsRejected as err:
+                    self._request_reauth(err)
                 except Exception as err:
                     _LOGGER.debug("IP recovery cloud refresh failed: %s", err)
 
-    def _update_host(self, ip: str) -> None:
-        """Persist a newly discovered IP into the config entry."""
-        d = self.entry.data
-        method = d.get(CONF_AUTH_METHOD, AUTH_LOCAL)
-        key = CONF_HOST if method == AUTH_LOCAL else CONF_LOCAL_IP
-        self.hass.config_entries.async_update_entry(self.entry, data={**d, key: ip})
+    def _request_reauth(self, err: Exception) -> None:
+        self._set_connection_state(False, error=str(err))
+        self.entry.async_start_reauth(self.hass)
+        self._stopping = True
 
     async def _mdns_find_ip(self, site_id: int) -> str | None:
         from homeassistant.components.zeroconf import async_get_instance
@@ -396,8 +410,13 @@ class SolarAssistantCoordinator:
         d = self.entry.data
         api_key = d[CONF_API_KEY]
         site_id = int(d[CONF_SITE_ID])
-        async with SolarAssistantClient(api_key) as client:
-            auth = await authorize_site(client, site_id)
+        try:
+            async with SolarAssistantClient(api_key) as client:
+                auth = await authorize_site(client, site_id)
+        except SolarAssistantError as err:
+            if err.status in (401, 403):
+                raise _CredentialsRejected(str(err)) from err
+            raise
         new_data = {
             **d,
             CONF_HOST: auth.host,
@@ -485,6 +504,10 @@ class SolarAssistantCoordinator:
         topics, self._pending_updates = frozenset(self._pending_updates), set()
         if topics:
             async_dispatcher_send(self.hass, self.signal_metric_update, topics)
+
+
+class _CredentialsRejected(Exception):
+    """Stored credentials must be replaced by the user."""
 
 
 class _ReauthRequired(Exception):

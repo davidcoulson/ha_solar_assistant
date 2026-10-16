@@ -71,6 +71,14 @@ Repeat the manual install for the [latest release](https://github.com/Solar-Assi
 
 After the installation, go to **Settings → Devices & Services → Add integration** and search for **SolarAssistant**.
 
+Local connections use plaintext HTTP and WebSocket transport. Passwords, local
+cloud tokens, and measurements are visible to anyone who can observe that traffic.
+Use a trusted network. mDNS is only an address hint: the integration never saves
+an mDNS address automatically. If the unit moves, verify its new address
+independently and use **Reconfigure** to confirm it. Reconfigure also supports
+cloud local-IP changes (leave the local IP empty to use the HTTPS cloud route).
+Changed passwords or revoked API keys prompt reauthentication in Home Assistant.
+
 ### Local password
 
 Use this if your SolarAssistant unit is on the same network as Home Assistant.

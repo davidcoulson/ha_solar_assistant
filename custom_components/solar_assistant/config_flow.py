@@ -86,6 +86,78 @@ class SolarAssistantConfigFlow(ConfigFlow, domain=DOMAIN):
             menu_options=["local", "cloud"],
         )
 
+    async def async_step_reauth(self, entry_data: dict[str, Any]) -> ConfigFlowResult:
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        return await self._async_update_connection(
+            self._get_reauth_entry(), "reauth_confirm", user_input
+        )
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        return await self._async_update_connection(
+            self._get_reconfigure_entry(), "reconfigure", user_input
+        )
+
+    async def _async_update_connection(
+        self, entry: ConfigEntry, step_id: str, user_input: dict[str, Any] | None
+    ) -> ConfigFlowResult:
+        """Validate explicitly submitted credentials/address, retaining identity."""
+        local = entry.data.get(CONF_AUTH_METHOD, AUTH_LOCAL) == AUTH_LOCAL
+        reconfigure = step_id == "reconfigure"
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            data = dict(entry.data)
+            try:
+                if local:
+                    data[CONF_PASSWORD] = user_input[CONF_PASSWORD]
+                    if reconfigure:
+                        data[CONF_HOST] = user_input[CONF_HOST].strip().rstrip("/")
+                    opts = Options(local_ip=data[CONF_HOST], password=data[CONF_PASSWORD])
+                else:
+                    data[CONF_API_KEY] = user_input[CONF_API_KEY].strip()
+                    async with SolarAssistantClient(data[CONF_API_KEY]) as client:
+                        auth = await authorize_site(client, int(data[CONF_SITE_ID]))
+                    data.update({
+                        CONF_HOST: auth.host, CONF_LOCAL_IP: auth.local_ip,
+                        CONF_TOKEN: auth.token, CONF_SITE_KEY: auth.site_key,
+                    })
+                    if reconfigure:
+                        data[CONF_LOCAL_IP] = user_input[CONF_LOCAL_IP].strip()
+                    opts = Options(
+                        host=data[CONF_HOST], local_ip=data[CONF_LOCAL_IP],
+                        token=data[CONF_TOKEN], site_id=int(data[CONF_SITE_ID]),
+                        site_key=data[CONF_SITE_KEY],
+                    )
+                sock = await connect(opts)
+                await sock.close()
+            except SolarAssistantError as err:
+                errors["base"] = "invalid_auth" if err.status in (401, 403) else "cannot_connect"
+            except ConnectError as err:
+                errors["base"] = (
+                    "invalid_auth" if "401" in str(err) or "403" in str(err) else "cannot_connect"
+                )
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+                errors["base"] = "cannot_connect"
+            except Exception:
+                _LOGGER.exception("Unexpected error updating connection")
+                errors["base"] = "unknown"
+            else:
+                return self.async_update_reload_and_abort(entry, data=data)
+
+        fields: dict[Any, Any] = {}
+        if reconfigure:
+            host_key = CONF_HOST if local else CONF_LOCAL_IP
+            fields[vol.Required(host_key, default=entry.data.get(host_key, ""))] = str
+        fields[vol.Required(CONF_PASSWORD if local else CONF_API_KEY)] = str
+        return self.async_show_form(
+            step_id=step_id, data_schema=vol.Schema(fields), errors=errors
+        )
+
     # -- Path A: local password --
 
     async def async_step_local(
