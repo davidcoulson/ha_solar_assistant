@@ -126,8 +126,8 @@ class SolarAssistantCoordinator:
 
     async def async_start(self) -> None:
         """Spawn the background reconnect loop. Returns immediately."""
-        self._task = self.hass.async_create_background_task(
-            self._run(), f"solar_assistant_ws[{self.entry.entry_id}]"
+        self._task = self.entry.async_create_background_task(
+            self.hass, self._run(), f"solar_assistant_ws[{self.entry.entry_id}]"
         )
 
     async def async_stop(self) -> None:

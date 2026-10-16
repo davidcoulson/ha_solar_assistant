@@ -1,6 +1,7 @@
 """SolarAssistant — Home Assistant integration entry points."""
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from typing import Any
 
@@ -16,10 +17,14 @@ PLATFORMS = ["binary_sensor", "number", "select", "sensor", "switch"]
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = SolarAssistantCoordinator(hass, entry)
-    await coordinator.async_start()
-
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    try:
+        await coordinator.async_start()
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    except (Exception, asyncio.CancelledError):
+        await coordinator.async_stop()
+        hass.data[DOMAIN].pop(entry.entry_id, None)
+        raise
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
     return True
 
