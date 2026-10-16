@@ -70,6 +70,8 @@ class SolarAssistantCoordinator:
         self.entry = entry
         self.definitions: dict[str, dict[str, Any]] = {}
         self.data: dict[str, Any] = {}
+        self.last_update: dict[str, datetime] = {}
+        self._session_healthy = False
         self._task: asyncio.Task | None = None
         self._stopping = False
         # Per-topic throttling of HA state writes (see _should_dispatch_update)
@@ -159,7 +161,6 @@ class SolarAssistantCoordinator:
                 try:
                     await self._refresh_cloud_token()
                     backoff = RECONNECT_INITIAL_S
-                    self._first_failure_at = None
                     continue
                 except _CredentialsRejected as auth_err:
                     self._request_reauth(auth_err)
@@ -174,6 +175,9 @@ class SolarAssistantCoordinator:
                 )
                 self._set_connection_state(False, error=str(err))
                 now = utcnow()
+                if self._session_healthy:
+                    backoff = RECONNECT_INITIAL_S
+                    self._first_failure_at = None
                 if self._first_failure_at is None:
                     self._first_failure_at = now
                 elapsed = (now - self._first_failure_at).total_seconds()
@@ -190,6 +194,9 @@ class SolarAssistantCoordinator:
             backoff = min(backoff * 2, RECONNECT_MAX_S)
 
     async def _session_once(self) -> None:
+        self._session_healthy = False
+        self.last_update.clear()
+        self._set_connection_state(False)
         opts = self._build_options()
 
         # Pre-populate definitions and data from REST before connecting the WebSocket.
@@ -211,11 +218,14 @@ class SolarAssistantCoordinator:
                 raise _CredentialsRejected(msg) from err
             raise
 
+        started = asyncio.get_running_loop().time()
+        self.connected_host = sock.connected_host
         try:
             filters = self._build_topic_filters()
             await sock.subscribe_metrics(self._on_metric, *filters)
-            self._set_connection_state(True, host=sock.connected_host)
             await sock.listen()
+            if not self._session_healthy and asyncio.get_running_loop().time() - started < 60:
+                raise ConnectionError("WebSocket closed before receiving data")
         finally:
             self._set_connection_state(False)
             try:
@@ -233,6 +243,8 @@ class SolarAssistantCoordinator:
                 raise _CredentialsRejected(str(err)) from err
             _LOGGER.debug("REST discovery skipped: %s", err)
             return
+        present = {m.topic for m in metrics if m.group != "Ignore"}
+        self._drop_topics({t for t in self.data if not t.startswith("system/")} - present)
         for m in metrics:
             if m.group == "Ignore":
                 continue
@@ -240,6 +252,7 @@ class SolarAssistantCoordinator:
             is_new = topic not in self.definitions
             self.definitions[topic] = _defn_for(m)
             self.data[topic] = m.value
+            self.last_update[topic] = utcnow()
             if is_new:
                 async_dispatcher_send(self.hass, self.signal_new_metric, topic)
             elif self.definitions[topic].get("platform") in ("number", "select", "switch"):
@@ -427,6 +440,17 @@ class SolarAssistantCoordinator:
         }
         self.hass.config_entries.async_update_entry(self.entry, data=new_data)
 
+    def _drop_topics(self, topics: set[str]) -> None:
+        for topic in topics:
+            self.data.pop(topic, None)
+            self.last_update.pop(topic, None)
+            async_dispatcher_send(self.hass, self.signal_metric_update, frozenset({topic}))
+
+    def _received_data(self) -> None:
+        self._session_healthy = True
+        if not self.is_connected:
+            self._set_connection_state(True)
+
     @callback
     def _on_metric(self, m: Metric) -> None:
         if m.group == "Ignore":
@@ -436,6 +460,8 @@ class SolarAssistantCoordinator:
         old_value = self.data.get(topic)
         self.definitions[topic] = _defn_for(m)
         self.data[topic] = m.value
+        self.last_update[topic] = utcnow()
+        self._received_data()
         if is_new:
             async_dispatcher_send(self.hass, self.signal_new_metric, topic)
             async_dispatcher_send(self.hass, self.signal_metric_update, frozenset({topic}))
