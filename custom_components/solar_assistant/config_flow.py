@@ -1,6 +1,8 @@
 """Config flow for SolarAssistant — local password or cloud API key."""
 from __future__ import annotations
 
+import asyncio
+import aiohttp
 import fnmatch
 import logging
 from typing import Any
@@ -123,8 +125,9 @@ class SolarAssistantConfigFlow(ConfigFlow, domain=DOMAIN):
                     site_id = None
                 if site_id is None:
                     try:
-                        site_id = await get_device_site_id(host, password=password)
-                    except SolarAssistantError as err:
+                        async with asyncio.timeout(3):
+                            site_id = await get_device_site_id(host, password=password)
+                    except (SolarAssistantError, aiohttp.ClientError, asyncio.TimeoutError, OSError) as err:
                         _LOGGER.debug("Failed to get site_id over REST: %s", err)
                 if site_id is not None:
                     data[CONF_SITE_ID] = site_id

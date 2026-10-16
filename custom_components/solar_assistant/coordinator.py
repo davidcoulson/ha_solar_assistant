@@ -8,6 +8,8 @@ import socket as _socket
 from datetime import datetime
 from typing import Any
 
+import aiohttp
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
@@ -87,6 +89,7 @@ class SolarAssistantCoordinator:
         self._first_failure_at: datetime | None = None
         self._last_ip_scan_at: datetime | None = None
         self._last_cloud_auth_at: datetime | None = None
+        self._last_site_id_attempt_at: datetime | None = None
 
     @property
     def signal_new_metric(self) -> str:
@@ -256,9 +259,15 @@ class SolarAssistantCoordinator:
         d = self.entry.data
         if d.get(CONF_AUTH_METHOD, AUTH_LOCAL) != AUTH_LOCAL or d.get(CONF_SITE_ID):
             return  # cloud entries already carry site_id; nothing to do if set
+        now = utcnow()
+        if (self._last_site_id_attempt_at is not None and
+                (now - self._last_site_id_attempt_at).total_seconds() < 300):
+            return
+        self._last_site_id_attempt_at = now
         try:
-            site_id = await get_device_site_id(d[CONF_HOST], password=d[CONF_PASSWORD])
-        except SolarAssistantError as err:
+            async with asyncio.timeout(3):
+                site_id = await get_device_site_id(d[CONF_HOST], password=d[CONF_PASSWORD])
+        except (SolarAssistantError, aiohttp.ClientError, asyncio.TimeoutError, OSError) as err:
             _LOGGER.debug("Failed to get site_id over REST: %s", err)
             return
         if site_id is None:
