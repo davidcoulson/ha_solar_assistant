@@ -449,7 +449,8 @@ class SolarAssistantOptionsFlow(OptionsFlow):
             return self.async_create_entry(
                 title="",
                 data={
-                    CONF_ENABLED_TOPICS: sorted(set(selected)),
+                    **self._entry.options,
+                    CONF_ENABLED_TOPICS: sorted(selected),
                     CONF_MIN_UPDATE_INTERVAL_S: user_input.get(
                         CONF_MIN_UPDATE_INTERVAL_S, current_min_interval
                     ),
