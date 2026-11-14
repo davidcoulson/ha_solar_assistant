@@ -75,6 +75,8 @@ class SolarAssistantCoordinator:
         # Coalescing: metric_update dispatches queued within the same event-loop
         # tick are flushed as a single dispatcher_send (see _queue_update)
         self._pending_updates: set[str] = set()
+        # Throttled topics whose latest value still has to be written
+        self._deferred: dict[str, asyncio.TimerHandle] = {}
         self._flush_scheduled = False
         # Connection state
         self.is_connected: bool = False
@@ -125,6 +127,9 @@ class SolarAssistantCoordinator:
 
     async def async_stop(self) -> None:
         self._stopping = True
+        for handle in self._deferred.values():
+            handle.cancel()
+        self._deferred.clear()
         if self._task:
             self._task.cancel()
             try:
@@ -408,7 +413,24 @@ class SolarAssistantCoordinator:
             async_dispatcher_send(self.hass, self.signal_metric_update, frozenset({topic}))
             return
         if self._should_dispatch_update(topic, old_value, m.value):
+            if handle := self._deferred.pop(topic, None):
+                handle.cancel()
             self._queue_update(topic)
+        elif topic not in self._deferred:
+            # Write the suppressed value once the interval is up, or the last
+            # sample of a burst would never reach HA.
+            wait = self.min_update_interval_s - (
+                utcnow() - self._last_dispatch[topic]
+            ).total_seconds()
+            self._deferred[topic] = self.hass.loop.call_later(
+                max(wait, 0), self._deliver_deferred, topic
+            )
+
+    @callback
+    def _deliver_deferred(self, topic: str) -> None:
+        self._deferred.pop(topic, None)
+        self._last_dispatch[topic] = utcnow()
+        self._queue_update(topic)
 
     def _should_dispatch_update(self, topic: str, old_value: Any, new_value: Any) -> bool:
         """Whether an existing metric's HA state should be written now.

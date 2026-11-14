@@ -366,7 +366,10 @@ class SolarAssistantOptionsFlow(OptionsFlow):
                     # options update via the API rather than the full form) —
                     # keep whatever was already enabled for it rather than
                     # silently clearing those metrics' entities.
-                    selected.extend(g for g in current_globs if g in sec["choices"])
+                    selected.extend(
+                        g for g in current_globs
+                        if any(_overlaps(g, c) for c in sec["choices"])
+                    )
             selected.extend(_globs_not_offered(current_globs, form_sections))
             return self.async_create_entry(
                 title="",
