@@ -1,6 +1,7 @@
 """SolarAssistant — Home Assistant integration entry points."""
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from typing import Any
 
@@ -16,10 +17,14 @@ PLATFORMS = ["binary_sensor", "number", "select", "sensor", "switch"]
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = SolarAssistantCoordinator(hass, entry)
-    await coordinator.async_start()
-
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    try:
+        await coordinator.async_start()
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    except (Exception, asyncio.CancelledError):
+        await coordinator.async_stop()
+        hass.data[DOMAIN].pop(entry.entry_id, None)
+        raise
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
     return True
 
@@ -52,7 +57,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Drop sensors that fall outside the new enabled-topic selection, then reload the entry.
+    """Disable excluded sensors without deleting registry customizations, then reload.
 
     Only read-only sensor entities are governed by the topic selection. The
     settings platforms (number/select/switch) and the connection binary_sensor
@@ -66,6 +71,13 @@ async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> Non
             if ent.domain != "sensor" or not ent.unique_id.startswith(prefix):
                 continue
             topic = ent.unique_id[len(prefix):]
+            if topic not in coordinator.definitions:
+                continue
             if not coordinator.should_create_sensor(topic):
-                registry.async_remove(ent.entity_id)
+                if ent.disabled_by is None:
+                    registry.async_update_entity(
+                        ent.entity_id, disabled_by=er.RegistryEntryDisabler.INTEGRATION
+                    )
+            elif ent.disabled_by == er.RegistryEntryDisabler.INTEGRATION:
+                registry.async_update_entity(ent.entity_id, disabled_by=None)
     await hass.config_entries.async_reload(entry.entry_id)

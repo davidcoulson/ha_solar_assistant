@@ -46,22 +46,23 @@ async def async_setup_entry(
 
 
 class SolarAssistantNumber(SolarAssistantMetricEntity, NumberEntity):
-    def __init__(
-        self,
-        coordinator: SolarAssistantCoordinator,
-        entry: ConfigEntry,
-        topic: str,
-        defn: dict[str, Any],
-    ) -> None:
-        super().__init__(coordinator, entry, topic, defn)
-        self._attr_device_class = defn.get("device_class")
-        self._attr_native_unit_of_measurement = (
-            defn.get("unit_of_measurement") or defn.get("unit") or None
-        )
-        if defn.get("min") is not None:
-            self._attr_native_min_value = float(defn["min"])
-        if defn.get("max") is not None:
-            self._attr_native_max_value = float(defn["max"])
+    @property
+    def device_class(self) -> str | None:
+        return self._definition.get("device_class")
+
+    @property
+    def native_unit_of_measurement(self) -> str | None:
+        return self._definition.get("unit_of_measurement") or self._definition.get("unit") or None
+
+    @property
+    def native_min_value(self) -> float:
+        value = self._definition.get("min")
+        return float(value) if value is not None else super().native_min_value
+
+    @property
+    def native_max_value(self) -> float:
+        value = self._definition.get("max")
+        return float(value) if value is not None else super().native_max_value
 
     @property
     def native_value(self) -> float | None:

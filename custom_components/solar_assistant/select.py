@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
@@ -46,15 +45,9 @@ async def async_setup_entry(
 
 
 class SolarAssistantSelect(SolarAssistantMetricEntity, SelectEntity):
-    def __init__(
-        self,
-        coordinator: SolarAssistantCoordinator,
-        entry: ConfigEntry,
-        topic: str,
-        defn: dict[str, Any],
-    ) -> None:
-        super().__init__(coordinator, entry, topic, defn)
-        self._attr_options = list(defn.get("options") or [])
+    @property
+    def options(self) -> list[str]:
+        return list(self._definition.get("options") or [])
 
     @property
     def current_option(self) -> str | None:

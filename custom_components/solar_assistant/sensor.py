@@ -63,19 +63,17 @@ async def async_setup_entry(
 
 
 class SolarAssistantSensor(SolarAssistantMetricEntity, SensorEntity):
-    def __init__(
-        self,
-        coordinator: SolarAssistantCoordinator,
-        entry: ConfigEntry,
-        topic: str,
-        defn: dict[str, Any],
-    ) -> None:
-        super().__init__(coordinator, entry, topic, defn)
-        self._attr_native_unit_of_measurement = (
-            defn.get("unit_of_measurement") or defn.get("unit") or None
-        )
-        self._attr_device_class = defn.get("device_class")
-        self._attr_state_class = defn.get("state_class")
+    @property
+    def native_unit_of_measurement(self) -> str | None:
+        return self._definition.get("unit_of_measurement") or self._definition.get("unit") or None
+
+    @property
+    def device_class(self) -> str | None:
+        return self._definition.get("device_class")
+
+    @property
+    def state_class(self) -> str | None:
+        return self._definition.get("state_class")
 
     @property
     def native_value(self) -> Any:

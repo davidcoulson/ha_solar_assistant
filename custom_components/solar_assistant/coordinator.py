@@ -8,6 +8,8 @@ import socket as _socket
 from datetime import datetime
 from typing import Any
 
+import aiohttp
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
@@ -68,6 +70,8 @@ class SolarAssistantCoordinator:
         self.entry = entry
         self.definitions: dict[str, dict[str, Any]] = {}
         self.data: dict[str, Any] = {}
+        self.last_update: dict[str, datetime] = {}
+        self._session_healthy = False
         self._task: asyncio.Task | None = None
         self._stopping = False
         # Per-topic throttling of HA state writes (see _should_dispatch_update)
@@ -87,6 +91,7 @@ class SolarAssistantCoordinator:
         self._first_failure_at: datetime | None = None
         self._last_ip_scan_at: datetime | None = None
         self._last_cloud_auth_at: datetime | None = None
+        self._last_site_id_attempt_at: datetime | None = None
 
     @property
     def signal_new_metric(self) -> str:
@@ -121,8 +126,8 @@ class SolarAssistantCoordinator:
 
     async def async_start(self) -> None:
         """Spawn the background reconnect loop. Returns immediately."""
-        self._task = self.hass.async_create_background_task(
-            self._run(), f"solar_assistant_ws[{self.entry.entry_id}]"
+        self._task = self.entry.async_create_background_task(
+            self.hass, self._run(), f"solar_assistant_ws[{self.entry.entry_id}]"
         )
 
     async def async_stop(self) -> None:
@@ -147,14 +152,19 @@ class SolarAssistantCoordinator:
                 self._first_failure_at = None
             except asyncio.CancelledError:
                 return
+            except _CredentialsRejected as err:
+                self._request_reauth(err)
+                return
             except _ReauthRequired as err:
                 _LOGGER.info("Re-authorizing site %s: %s", self.entry.title, err)
                 self._set_connection_state(False, error=str(err))
                 try:
                     await self._refresh_cloud_token()
                     backoff = RECONNECT_INITIAL_S
-                    self._first_failure_at = None
                     continue
+                except _CredentialsRejected as auth_err:
+                    self._request_reauth(auth_err)
+                    return
                 except Exception as auth_err:
                     _LOGGER.warning("Re-authorize failed: %s", auth_err)
                     self._set_connection_state(False, error=f"re-authorize failed: {auth_err}")
@@ -165,6 +175,9 @@ class SolarAssistantCoordinator:
                 )
                 self._set_connection_state(False, error=str(err))
                 now = utcnow()
+                if self._session_healthy:
+                    backoff = RECONNECT_INITIAL_S
+                    self._first_failure_at = None
                 if self._first_failure_at is None:
                     self._first_failure_at = now
                 elapsed = (now - self._first_failure_at).total_seconds()
@@ -181,6 +194,9 @@ class SolarAssistantCoordinator:
             backoff = min(backoff * 2, RECONNECT_MAX_S)
 
     async def _session_once(self) -> None:
+        self._session_healthy = False
+        self.last_update.clear()
+        self._set_connection_state(False)
         opts = self._build_options()
 
         # Pre-populate definitions and data from REST before connecting the WebSocket.
@@ -196,15 +212,20 @@ class SolarAssistantCoordinator:
             sock = await connect(opts)
         except ConnectError as err:
             msg = str(err)
-            if ("401" in msg or "403" in msg) and self.entry.data.get(CONF_AUTH_METHOD) == AUTH_CLOUD:
-                raise _ReauthRequired(msg) from err
+            if "401" in msg or "403" in msg:
+                if self.entry.data.get(CONF_AUTH_METHOD) == AUTH_CLOUD:
+                    raise _ReauthRequired(msg) from err
+                raise _CredentialsRejected(msg) from err
             raise
 
+        started = asyncio.get_running_loop().time()
+        self.connected_host = sock.connected_host
         try:
             filters = self._build_topic_filters()
             await sock.subscribe_metrics(self._on_metric, *filters)
-            self._set_connection_state(True, host=sock.connected_host)
             await sock.listen()
+            if not self._session_healthy and asyncio.get_running_loop().time() - started < 60:
+                raise ConnectionError("WebSocket closed before receiving data")
         finally:
             self._set_connection_state(False)
             try:
@@ -217,8 +238,13 @@ class SolarAssistantCoordinator:
         try:
             metrics = await self._fetch_discovery()
         except Exception as err:
+            if (self.entry.data.get(CONF_AUTH_METHOD, AUTH_LOCAL) == AUTH_LOCAL
+                    and getattr(err, "status", None) in (401, 403)):
+                raise _CredentialsRejected(str(err)) from err
             _LOGGER.debug("REST discovery skipped: %s", err)
             return
+        present = {m.topic for m in metrics if m.group != "Ignore"}
+        self._drop_topics({t for t in self.data if not t.startswith("system/")} - present)
         for m in metrics:
             if m.group == "Ignore":
                 continue
@@ -226,10 +252,10 @@ class SolarAssistantCoordinator:
             is_new = topic not in self.definitions
             self.definitions[topic] = _defn_for(m)
             self.data[topic] = m.value
+            self.last_update[topic] = utcnow()
             if is_new:
                 async_dispatcher_send(self.hass, self.signal_new_metric, topic)
-            elif self.definitions[topic].get("platform") in ("number", "select", "switch"):
-                async_dispatcher_send(self.hass, self.signal_metric_update, frozenset({topic}))
+            async_dispatcher_send(self.hass, self.signal_metric_update, frozenset({topic}))
 
     async def _fetch_discovery(self) -> list[DeviceMetric]:
         d = self.entry.data
@@ -256,9 +282,15 @@ class SolarAssistantCoordinator:
         d = self.entry.data
         if d.get(CONF_AUTH_METHOD, AUTH_LOCAL) != AUTH_LOCAL or d.get(CONF_SITE_ID):
             return  # cloud entries already carry site_id; nothing to do if set
+        now = utcnow()
+        if (self._last_site_id_attempt_at is not None and
+                (now - self._last_site_id_attempt_at).total_seconds() < 300):
+            return
+        self._last_site_id_attempt_at = now
         try:
-            site_id = await get_device_site_id(d[CONF_HOST], password=d[CONF_PASSWORD])
-        except SolarAssistantError as err:
+            async with asyncio.timeout(3):
+                site_id = await get_device_site_id(d[CONF_HOST], password=d[CONF_PASSWORD])
+        except (SolarAssistantError, aiohttp.ClientError, asyncio.TimeoutError, OSError) as err:
             _LOGGER.debug("Failed to get site_id over REST: %s", err)
             return
         if site_id is None:
@@ -283,9 +315,12 @@ class SolarAssistantCoordinator:
         _LOGGER.info("IP recovery: scanning mDNS for site_id=%s", site_id)
         new_ip = await self._mdns_find_ip(int(site_id))
         if new_ip:
-            _LOGGER.info("IP recovery: found %s via mDNS, updating stored host", new_ip)
-            self._update_host(new_ip)
-            return
+            _LOGGER.warning(
+                "mDNS suggests %s for this unit. Verify the address independently, "
+                "then use Reconfigure to confirm it before credentials are sent", new_ip
+            )
+            if method == AUTH_LOCAL:
+                return
 
         # mDNS found nothing — for cloud entries try re-authorizing (max once per 12 h)
         if method == AUTH_CLOUD:
@@ -296,15 +331,15 @@ class SolarAssistantCoordinator:
                 _LOGGER.info("IP recovery: refreshing cloud token to get updated local IP")
                 try:
                     await self._refresh_cloud_token()
+                except _CredentialsRejected as err:
+                    self._request_reauth(err)
                 except Exception as err:
                     _LOGGER.debug("IP recovery cloud refresh failed: %s", err)
 
-    def _update_host(self, ip: str) -> None:
-        """Persist a newly discovered IP into the config entry."""
-        d = self.entry.data
-        method = d.get(CONF_AUTH_METHOD, AUTH_LOCAL)
-        key = CONF_HOST if method == AUTH_LOCAL else CONF_LOCAL_IP
-        self.hass.config_entries.async_update_entry(self.entry, data={**d, key: ip})
+    def _request_reauth(self, err: Exception) -> None:
+        self._set_connection_state(False, error=str(err))
+        self.entry.async_start_reauth(self.hass)
+        self._stopping = True
 
     async def _mdns_find_ip(self, site_id: int) -> str | None:
         from homeassistant.components.zeroconf import async_get_instance
@@ -387,8 +422,13 @@ class SolarAssistantCoordinator:
         d = self.entry.data
         api_key = d[CONF_API_KEY]
         site_id = int(d[CONF_SITE_ID])
-        async with SolarAssistantClient(api_key) as client:
-            auth = await authorize_site(client, site_id)
+        try:
+            async with SolarAssistantClient(api_key) as client:
+                auth = await authorize_site(client, site_id)
+        except SolarAssistantError as err:
+            if err.status in (401, 403):
+                raise _CredentialsRejected(str(err)) from err
+            raise
         new_data = {
             **d,
             CONF_HOST: auth.host,
@@ -399,6 +439,17 @@ class SolarAssistantCoordinator:
         }
         self.hass.config_entries.async_update_entry(self.entry, data=new_data)
 
+    def _drop_topics(self, topics: set[str]) -> None:
+        for topic in topics:
+            self.data.pop(topic, None)
+            self.last_update.pop(topic, None)
+            async_dispatcher_send(self.hass, self.signal_metric_update, frozenset({topic}))
+
+    def _received_data(self) -> None:
+        self._session_healthy = True
+        if not self.is_connected:
+            self._set_connection_state(True)
+
     @callback
     def _on_metric(self, m: Metric) -> None:
         if m.group == "Ignore":
@@ -408,6 +459,8 @@ class SolarAssistantCoordinator:
         old_value = self.data.get(topic)
         self.definitions[topic] = _defn_for(m)
         self.data[topic] = m.value
+        self.last_update[topic] = utcnow()
+        self._received_data()
         if is_new:
             async_dispatcher_send(self.hass, self.signal_new_metric, topic)
             async_dispatcher_send(self.hass, self.signal_metric_update, frozenset({topic}))
@@ -476,6 +529,10 @@ class SolarAssistantCoordinator:
         topics, self._pending_updates = frozenset(self._pending_updates), set()
         if topics:
             async_dispatcher_send(self.hass, self.signal_metric_update, topics)
+
+
+class _CredentialsRejected(Exception):
+    """Stored credentials must be replaced by the user."""
 
 
 class _ReauthRequired(Exception):

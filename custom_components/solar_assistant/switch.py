@@ -46,16 +46,13 @@ async def async_setup_entry(
 
 
 class SolarAssistantSwitch(SolarAssistantMetricEntity, SwitchEntity):
-    def __init__(
-        self,
-        coordinator: SolarAssistantCoordinator,
-        entry: ConfigEntry,
-        topic: str,
-        defn: dict[str, Any],
-    ) -> None:
-        super().__init__(coordinator, entry, topic, defn)
-        self._payload_on: str = str(defn.get("payload_on") or "1")
-        self._payload_off: str = str(defn.get("payload_off") or "0")
+    @property
+    def _payload_on(self) -> str:
+        return str(self._definition.get("payload_on") or "1")
+
+    @property
+    def _payload_off(self) -> str:
+        return str(self._definition.get("payload_off") or "0")
 
     @property
     def is_on(self) -> bool | None:
