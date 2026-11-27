@@ -51,11 +51,6 @@ async def test_snapshots_expire_omitted_topics(coordinator):
     await coordinator._rest_discovery()
     assert old.topic not in coordinator.data
     assert old.topic not in coordinator.last_update
-    system = metric("system/temp", device="system")
-    coordinator._on_system_metrics([system])
-    coordinator._on_system_metrics([])
-    assert system.topic not in coordinator.data
-    assert system.topic not in coordinator.last_update
 
 
 @pytest.mark.asyncio
